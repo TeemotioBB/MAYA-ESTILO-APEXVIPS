@@ -148,13 +148,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "started_at":    datetime.utcnow().isoformat(),
     })
 
-    # 1) Foto de perfil (opcional)
-    if config.PHOTO_PROFILE.exists():
+    # 1) Vídeo de abertura (opcional)
+    if config.VIDEO_START.exists():
         try:
-            with open(config.PHOTO_PROFILE, "rb") as photo:
-                await context.bot.send_photo(chat_id, photo=photo)
+            await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_VIDEO)
+            with open(config.VIDEO_START, "rb") as video:
+                await context.bot.send_video(chat_id, video=video)
         except Exception as e:
-            logger.warning(f"Erro enviando foto: {e}")
+            logger.warning(f"Erro enviando vídeo de abertura: {e}")
 
     # 2) Voice message (opcional)
     if config.AUDIO_START.exists():
