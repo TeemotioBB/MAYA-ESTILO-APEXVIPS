@@ -28,8 +28,10 @@ MEDIA_DIR = BASE_DIR / "content"
 # 🤖 TELEGRAM
 # ═══════════════════════════════════════════════════════════════════════════════
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN        = os.getenv("BOT_TOKEN", "")
 BOT_PERSONA_NAME = os.getenv("BOT_PERSONA_NAME", "Maya")
+# Username do bot SEM @ (ex: "maya_vip_bot") — usado no link t.me/...
+BOT_USERNAME     = os.getenv("BOT_USERNAME", "seu_bot_aqui")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 💳 SYNCPAY
@@ -56,40 +58,40 @@ FLASK_PORT           = int(os.getenv("PORT") or os.getenv("FLASK_PORT") or "8080
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 📊 META CONVERSIONS API (CAPI)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+META_PIXEL_ID        = os.getenv("META_PIXEL_ID", "")
+META_ACCESS_TOKEN    = os.getenv("META_ACCESS_TOKEN", "")
+META_API_VERSION     = os.getenv("META_API_VERSION", "v22.0")
+# Deixe TEST_EVENT_CODE setado durante setup (pega no Events Manager > Test Events).
+# REMOVA em produção (deixe string vazia) ou os eventos não contam pra real.
+META_TEST_EVENT_CODE = os.getenv("META_TEST_EVENT_CODE", "")
+
+# URL pública da landing page (usada como event_source_url no CAPI)
+LANDING_PAGE_URL     = os.getenv("LANDING_PAGE_URL", "https://example.com/")
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # 🎁 ENTREGÁVEIS (canais VIP e contato whatsapp)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Link de convite do canal VIP principal — gere pelo Telegram com expiração e
-# limite de usos pra cada compra (idealmente 1 uso, válido por 24h).
-# Pra começar, pode usar um link fixo, mas o IDEAL é o bot gerar links únicos
-# via createChatInviteLink (ver release_vip_access em maya_bot.py).
-VIP_CHANNEL_ID         = os.getenv("VIP_CHANNEL_ID", "")          # -1001234567890
-VIP_PLUS_CHANNEL_ID    = os.getenv("VIP_PLUS_CHANNEL_ID", "")     # -1001234567891
-VIP_CHANNEL_FALLBACK   = os.getenv("VIP_CHANNEL_FALLBACK", "")    # link público backup
+VIP_CHANNEL_ID         = os.getenv("VIP_CHANNEL_ID", "")
+VIP_PLUS_CHANNEL_ID    = os.getenv("VIP_PLUS_CHANNEL_ID", "")
+VIP_CHANNEL_FALLBACK   = os.getenv("VIP_CHANNEL_FALLBACK", "")
 WHATSAPP_CONTACT       = os.getenv("WHATSAPP_CONTACT", "https://wa.me/5511999999999")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🎬 MÍDIAS (coloque os arquivos na pasta content/)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-PHOTO_PROFILE = MEDIA_DIR / "photo_profile.jpg"   # opcional — foto que aparece no chat
-VIDEO_START   = MEDIA_DIR / "video_start.mp4"     # vídeo de abertura do /start
-AUDIO_START   = MEDIA_DIR / "audio_start.ogg"     # voice message do /start (.ogg ou .mp3)
-VIDEO_TEASER  = MEDIA_DIR / "video_teaser.mp4"    # vídeo de prévia mostrado antes do PIX
+PHOTO_PROFILE = MEDIA_DIR / "photo_profile.jpg"
+VIDEO_START   = MEDIA_DIR / "video_start.mp4"
+AUDIO_START   = MEDIA_DIR / "audio_start.ogg"
+VIDEO_TEASER  = MEDIA_DIR / "video_teaser.mp4"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 💰 PLANOS DE VENDA
 # ═══════════════════════════════════════════════════════════════════════════════
-#
-# Cada plano tem:
-#   - id:           identificador interno
-#   - emoji:        ícone do botão
-#   - name:         nome visível
-#   - price:        valor em reais (float)
-#   - duration:     "Vitalício" ou "X dias" — exibido na confirmação
-#   - deliverable:  "channel" | "channel_plus" | "whatsapp"
-#                   define o que o bot entrega quando o pagamento confirma
-# ─────────────────────────────────────────────────────────────────────────────
 
 PLANS = {
     "tudo": {
@@ -118,7 +120,6 @@ PLANS = {
     },
 }
 
-# Ordem dos botões na tela de /start (do maior valor → menor, ou como preferir)
 PLANS_DISPLAY_ORDER = ["tudo", "tudo_plus", "whats"]
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -128,17 +129,12 @@ PLANS_DISPLAY_ORDER = ["tudo", "tudo_plus", "whats"]
 PIX_VALIDADE_MINUTOS = 30
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 📊 SOCIAL PROOF (contador "X pessoas entraram nas últimas 2h")
+# 📊 SOCIAL PROOF
 # ═══════════════════════════════════════════════════════════════════════════════
-#
-# Pode ser real (contando no Redis) ou simulado. Aqui está simulado entre
-# SOCIAL_PROOF_BASE e SOCIAL_PROOF_BASE + SOCIAL_PROOF_VARIANCE.
-# Pra tornar real, conte starts únicos nas últimas 2h via Redis sorted set.
-# ─────────────────────────────────────────────────────────────────────────────
 
 SOCIAL_PROOF_BASE     = 280
 SOCIAL_PROOF_VARIANCE = 80
-SOCIAL_PROOF_MEMBERS  = 488   # número fixo "X membros já estão lá dentro"
+SOCIAL_PROOF_MEMBERS  = 488
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🛡️  VALIDAÇÃO MÍNIMA — falha cedo se faltar config crítica
@@ -159,3 +155,11 @@ def validate_required_config():
             f"❌ Faltam variáveis de ambiente obrigatórias: {', '.join(missing)}\n"
             f"   Copie .env.example pra .env e preencha."
         )
+
+    # CAPI — não bloqueia o boot, só avisa
+    if not META_PIXEL_ID:
+        print("⚠️ AVISO: META_PIXEL_ID não configurado — CAPI desabilitada")
+    if not META_ACCESS_TOKEN:
+        print("⚠️ AVISO: META_ACCESS_TOKEN não configurado — CAPI desabilitada")
+    if not BOT_USERNAME or BOT_USERNAME == "seu_bot_aqui":
+        print("⚠️ AVISO: BOT_USERNAME não configurado — landing page vai redirecionar errado")
