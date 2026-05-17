@@ -2,10 +2,11 @@
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║              💳 SYNCPAY INTEGRATION — Maya Bot                              ║
 ║                                                                              ║
-║  Versão corrigida:                                                          ║
-║    • Idempotência por identifier (não mais por dia)                         ║
-║    • Só marca como "processado" APÓS entrega bem-sucedida                   ║
-║    • Permite retry automático se a entrega falhar                           ║
+║  Versão CAPI-aware:                                                          ║
+║    • gerar_pix() agora recebe telefone real coletado no bot                  ║
+║    • _processar_pagamento() extrai CPF/nome reais do webhook                 ║
+║    • Após entrega bem-sucedida, dispara Purchase via CAPI                    ║
+║    • Idempotência por identifier preservada                                  ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -15,17 +16,18 @@ import time
 import logging
 import asyncio
 import requests
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 from typing import Optional, Callable
 
 from flask import request as flask_request, jsonify
 
 import config
+import capi
 
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 🗄️  ESTADO INTERNO (injetado via init)
+# 🗄️  ESTADO INTERNO
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _r            = None
@@ -90,9 +92,22 @@ def _get_token() -> str:
 # 💸 GERAÇÃO DE PIX
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def gerar_pix(uid: int, amount: float, plan_id: str, nome_cliente: str = "Cliente") -> dict:
+def gerar_pix(uid: int, amount: float, plan_id: str,
+              nome_cliente: str = "Cliente",
+              telefone: Optional[str] = None,
+              cpf: Optional[str] = None) -> dict:
+    """
+    Gera um PIX via SyncPay.
+    Agora aceita telefone e CPF reais (vindos da coleta no bot).
+    Quando o user pagar o PIX, o CPF/nome reais do pagador volta no webhook.
+    """
     token = _get_token()
     webhook_url = f"{config.WEBHOOK_BASE_URL}{config.SYNCPAY_WEBHOOK_PATH}"
+
+    # Telefone normalizado pro formato que a SyncPay espera (só dígitos com DDD)
+    tel = telefone or ""
+    if tel.startswith("55") and len(tel) > 11:
+        tel = tel[2:]  # remove DDI '55' — SyncPay quer só DDD+número
 
     payload = {
         "amount":      round(amount, 2),
@@ -100,10 +115,12 @@ def gerar_pix(uid: int, amount: float, plan_id: str, nome_cliente: str = "Client
         "webhook_url": webhook_url,
         "client": {
             "name":  nome_cliente or "Cliente",
-            "cpf":   "00000000000",
+            "cpf":   cpf or "00000000000",   # SyncPay aceita placeholder; o CPF real vem do pagador
             "email": f"user{uid}@{config.BOT_PERSONA_NAME.lower()}bot.com",
-            "phone": "11999999999",
+            "phone": tel or "11999999999",
         },
+        # ── External reference: amarra esse PIX ao usuário (útil pra reconciliação)
+        "external_reference": f"uid_{uid}",
     }
 
     last_err = None
@@ -171,7 +188,7 @@ def salvar_customer(uid: int, tg_user, plan_id: str) -> dict:
         "first_name":    tg_user.first_name or "",
         "last_name":     tg_user.last_name or "",
         "username":      tg_user.username or "",
-        "language_code": tg_user.language_code or "pt-br",
+        "language_code": getattr(tg_user, "language_code", None) or "pt-br",
         "plan_id":       plan_id,
         "saved_at":      datetime.utcnow().isoformat(),
     }
@@ -214,13 +231,38 @@ def consultar_status(identifier: str) -> Optional[str]:
 
 
 def usuario_pagou(uid: int) -> bool:
-    """Pagamento foi confirmado (webhook recebeu PAID_OUT)."""
     return bool(_r and _r.exists(_k_paid(uid)))
 
 
 def foi_entregue(identifier: str) -> bool:
-    """Entrega do VIP foi feita com sucesso pra esse pagamento."""
     return bool(_r and _r.exists(_k_processed(identifier)))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🔎 EXTRAÇÃO DE DADOS DO WEBHOOK
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _extract_customer_from_webhook(transacao: dict) -> dict:
+    """
+    Extrai nome, CPF, email, telefone do payload da SyncPay.
+    A estrutura exata varia — tenta múltiplas chaves possíveis.
+
+    Ex.: o user mostrou que vem 'Cliente: Vinicius Murilo Pereira Pimenta'
+    e 'CPF: 455.620.518-26'.
+    """
+    client = (
+        transacao.get("client")
+        or transacao.get("customer")
+        or transacao.get("payer")
+        or {}
+    )
+
+    return {
+        "name":  client.get("name")  or client.get("full_name") or transacao.get("client_name")  or "",
+        "cpf":   client.get("cpf")   or client.get("document")  or transacao.get("cpf")          or "",
+        "email": client.get("email") or transacao.get("email") or "",
+        "phone": client.get("phone") or client.get("telefone") or transacao.get("phone")        or "",
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -232,16 +274,19 @@ def _register_webhook_route(flask_app):
     def syncpay_webhook():
         try:
             data       = flask_request.get_json(silent=True) or {}
-            transacao  = data.get("data", {})
-            identifier = transacao.get("id")
+            transacao  = data.get("data", data)  # algumas APIs envelopam, outras não
+            identifier = transacao.get("id") or transacao.get("identifier")
             status     = transacao.get("status")
             amount     = transacao.get("final_amount") or transacao.get("amount")
 
             logger.info(f"[SyncPay Webhook] id={identifier} status={status} valor={amount}")
 
             if status in ["completed", "PAID_OUT"] and identifier:
+                # Extrai dados do pagador (CPF, nome reais)
+                customer_data = _extract_customer_from_webhook(transacao)
+
                 asyncio.run_coroutine_threadsafe(
-                    _processar_pagamento(identifier, amount),
+                    _processar_pagamento(identifier, amount, customer_data),
                     _loop
                 )
             else:
@@ -252,11 +297,14 @@ def _register_webhook_route(flask_app):
             return jsonify({"ok": False}), 200
 
 
-async def _processar_pagamento(identifier: str, amount):
+async def _processar_pagamento(identifier: str, amount, customer_data: dict):
     """
-    Pagamento confirmado. Idempotência POR IDENTIFIER:
-      - Se já foi entregue antes (mesmo identifier) → ignora (webhook duplicado)
-      - Se a entrega falhar → não marca como processado, permite retry
+    Pagamento confirmado. Fluxo:
+      1) Idempotência por identifier
+      2) Marca pagamento confirmado
+      3) Atualiza PII no capi com dados reais do pagador (CPF, nome)
+      4) Dispara entrega VIP
+      5) Se entrega OK: dispara Purchase CAPI + limpa caches
     """
     try:
         uid_raw = _r.get(_k_id_to_uid(identifier))
@@ -267,20 +315,32 @@ async def _processar_pagamento(identifier: str, amount):
 
         plan_id = _r.get(_k_id_to_plan(identifier)) or ""
 
-        # ── Idempotência por identifier (NÃO mais por dia) ────────────────────
-        # Protege contra webhook duplicado, mas permite reprocessar pagamentos
-        # diferentes do mesmo usuário (ele pode comprar várias vezes no mesmo dia).
+        # ── Idempotência por identifier ──────────────────────────────────────
         if _r.exists(_k_processed(identifier)):
             logger.info(f"[SyncPay] Webhook duplicado p/ identifier={identifier} — ignorando")
             return
 
-        # Marca pagamento confirmado (diferente de "entregue")
+        # Marca pagamento confirmado
         _r.setex(_k_paid(uid), timedelta(days=365), "1")
+
+        # ── Atualiza PII no CAPI com dados reais do pagador ─────────────────
+        # Isso enriquece o Purchase: CPF + nome reais (vindos do pagamento PIX)
+        if customer_data.get("cpf") or customer_data.get("name"):
+            capi.save_user_pii(
+                uid,
+                full_name=customer_data.get("name") or None,
+                cpf=customer_data.get("cpf") or None,
+            )
+            logger.info(
+                f"[SyncPay] 📥 PII atualizada do webhook: "
+                f"nome={'✓' if customer_data.get('name') else '✗'} "
+                f"cpf={'✓' if customer_data.get('cpf') else '✗'}"
+            )
 
         customer = recuperar_customer(uid)
         logger.info(f"[SyncPay] ✅ Pagamento OK: uid={uid} plan={plan_id} R${amount}")
 
-        # ── Dispara entrega ───────────────────────────────────────────────────
+        # ── Dispara entrega ──────────────────────────────────────────────────
         delivery_success = False
         if _on_payment:
             try:
@@ -295,14 +355,30 @@ async def _processar_pagamento(identifier: str, amount):
             except Exception as cb_err:
                 logger.error(f"[SyncPay] ❌ Entrega falhou para uid={uid}: {cb_err}")
 
-        # ── Só marca como processado E limpa caches APÓS entrega OK ──────────
+        # ── Só marca como processado e dispara Purchase APÓS entrega OK ─────
         if delivery_success:
             _r.setex(_k_processed(identifier), timedelta(days=7), "1")
+
+            # ── Dispara Purchase via CAPI (fire-and-forget) ────────────────
+            plan = config.PLANS.get(plan_id, {})
+            try:
+                await asyncio.to_thread(
+                    capi.send_purchase,
+                    uid,
+                    transaction_id=str(identifier),
+                    plan_id=plan_id,
+                    plan_name=plan.get("name", plan_id),
+                    value=float(amount),
+                )
+            except Exception as capi_err:
+                logger.error(f"[SyncPay] ❌ Falha disparando Purchase CAPI: {capi_err}")
+
+            # ── Limpa caches (PII fica preservada pra histórico) ───────────
             _r.delete(_k_id_to_uid(identifier))
             _r.delete(_k_id_to_plan(identifier))
             _r.delete(_k_pix(uid))
             _r.delete(_k_customer(uid))
-            logger.info(f"[SyncPay] 🎉 Entrega concluída e marcada: id={identifier}")
+            logger.info(f"[SyncPay] 🎉 Entrega concluída + Purchase CAPI: id={identifier}")
         else:
             logger.warning(
                 f"[SyncPay] ⚠️ Entrega falhou — chaves mantidas pra retry. "
@@ -318,12 +394,7 @@ async def _processar_pagamento(identifier: str, amount):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def retry_entrega(identifier: str) -> bool:
-    """
-    Reprocessa a entrega de um pagamento já confirmado que falhou.
-    Retorna True se a entrega foi bem-sucedida.
-    """
     try:
-        # Já foi entregue? Não faz nada.
         if _r.exists(_k_processed(identifier)):
             logger.info(f"[SyncPay] retry_entrega: id={identifier} já entregue antes")
             return True
@@ -349,6 +420,27 @@ async def retry_entrega(identifier: str) -> bool:
         )
 
         _r.setex(_k_processed(identifier), timedelta(days=7), "1")
+
+        # Tenta disparar Purchase no retry também (com amount=0 se não temos)
+        # Importante: no retry o amount real foi perdido — se quiser preservar,
+        # salve o amount junto com _k_id_to_uid quando o webhook chegar.
+        # Pra ter dado correto, aqui buscamos o status do pagamento.
+        try:
+            status_data = _get_payment_full(identifier)
+            real_amount = float(status_data.get("amount", 0))
+            plan = config.PLANS.get(plan_id, {})
+            if real_amount > 0:
+                await asyncio.to_thread(
+                    capi.send_purchase,
+                    uid,
+                    transaction_id=str(identifier),
+                    plan_id=plan_id,
+                    plan_name=plan.get("name", plan_id),
+                    value=real_amount,
+                )
+        except Exception as capi_err:
+            logger.error(f"[SyncPay] ❌ Retry CAPI Purchase falhou: {capi_err}")
+
         _r.delete(_k_id_to_uid(identifier))
         _r.delete(_k_id_to_plan(identifier))
         _r.delete(_k_pix(uid))
@@ -359,6 +451,22 @@ async def retry_entrega(identifier: str) -> bool:
     except Exception as e:
         logger.error(f"[SyncPay] ❌ retry_entrega erro: {e}")
         return False
+
+
+def _get_payment_full(identifier: str) -> dict:
+    """Busca o pagamento completo (pra pegar o amount real no retry)."""
+    try:
+        token = _get_token()
+        resp = requests.get(
+            f"{config.SYNCPAY_BASE_URL}/cash-in/{identifier}",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json() or {}
+    except Exception as e:
+        logger.error(f"[SyncPay] _get_payment_full erro: {e}")
+        return {}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
