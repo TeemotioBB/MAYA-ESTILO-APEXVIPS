@@ -10,7 +10,7 @@
 ║  [plano clicado]   → dispara InitiateCheckout (CAPI)                         ║
 ║                    → confirmação + botão "Pagar com Pix"                     ║
 ║                                                                              ║
-║  [Pagar com Pix]   → entra em modo "aguardando nome"                         ║
+║  [Pagar com Pix]   → entra em modo "aguardando telefone"                     ║
 ║                                                                              ║
 ║  [user envia nome] → pede telefone                                           ║
 ║                                                                              ║
@@ -77,7 +77,6 @@ def _k_state(uid):          return f"maya:state:{uid}"           # estado do "fo
 def _k_pending_plan(uid):   return f"maya:pending_plan:{uid}"    # plano escolhido aguardando PIX
 
 # Estados possíveis:
-STATE_AWAITING_NAME  = "awaiting_name"
 STATE_AWAITING_PHONE = "awaiting_phone"
 
 
@@ -139,18 +138,9 @@ def plan_confirmation_text(plan: dict) -> str:
     )
 
 
-def ask_name_text() -> str:
-    return (
-        "📝 *Antes de gerar seu PIX, me passa:*\n\n"
-        "1️⃣ Seu *nome completo*\n\n"
-        "_Vou usar pra liberar seu acesso e dar suporte caso precise._"
-    )
-
-
 def ask_phone_text() -> str:
     return (
-        "✅ Show!\n\n"
-        "2️⃣ Agora me passa seu *WhatsApp com DDD*\n"
+        "📱 Me passa seu *WhatsApp com DDD*\n"
         "_(ex: 31 99999-9999)_\n\n"
         "_É pra te enviar o link do grupo VIP no zap caso o Telegram dê problema._"
     )
