@@ -10,7 +10,9 @@
 ║  [plano clicado]   → dispara InitiateCheckout (CAPI)                         ║
 ║                    → confirmação + botão "Pagar com Pix"                     ║
 ║                                                                              ║
-║  [Pagar com Pix]   → entra em modo "aguardando telefone"                     ║
+║  [Pagar com Pix]   → entra em modo "aguardando nome"                         ║
+║                                                                              ║
+║  [user envia nome] → pede telefone                                           ║
 ║                                                                              ║
 ║  [user envia tel.] → valida, gera PIX, dispara AddPaymentInfo (CAPI)         ║
 ║                    → 3 botões (Verificar / Copiar / QR)                      ║
@@ -75,6 +77,7 @@ def _k_state(uid):          return f"maya:state:{uid}"           # estado do "fo
 def _k_pending_plan(uid):   return f"maya:pending_plan:{uid}"    # plano escolhido aguardando PIX
 
 # Estados possíveis:
+STATE_AWAITING_NAME  = "awaiting_name"
 STATE_AWAITING_PHONE = "awaiting_phone"
 
 
@@ -136,9 +139,18 @@ def plan_confirmation_text(plan: dict) -> str:
     )
 
 
+def ask_name_text() -> str:
+    return (
+        "📝 *Antes de gerar seu PIX, me passa:*\n\n"
+        "1️⃣ Seu *nome completo*\n\n"
+        "_Vou usar pra liberar seu acesso e dar suporte caso precise._"
+    )
+
+
 def ask_phone_text() -> str:
     return (
-        "📱 Me passa seu *WhatsApp com DDD*\n"
+        "✅ Show!\n\n"
+        "2️⃣ Agora me passa seu *WhatsApp com DDD*\n"
         "_(ex: 31 99999-9999)_\n\n"
         "_É pra te enviar o link do grupo VIP no zap caso o Telegram dê problema._"
     )
@@ -293,17 +305,17 @@ async def cb_pix(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Guarda qual plano está aguardando coleta
     r.setex(_k_pending_plan(uid), 1800, plan_id)
 
-    # ── Se já temos telefone, pula direto pro PIX ─────────────────────────
+    # ── Se já temos PII completa, pula direto pro PIX ──────────────────────
     pii = capi.get_user_pii(uid)
-    if pii.get("phone"):
+    if pii.get("full_name") and pii.get("phone"):
         await _generate_and_send_pix(context, chat_id, uid, plan_id)
         return
 
-    # ── Senão, pede só o telefone ──────────────────────────────────────────
-    _set_state(uid, STATE_AWAITING_PHONE)
+    # ── Senão, começa o form: pede nome ────────────────────────────────────
+    _set_state(uid, STATE_AWAITING_NAME)
     await context.bot.send_message(
         chat_id=chat_id,
-        text=ask_phone_text(),
+        text=ask_name_text(),
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -322,6 +334,25 @@ async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Sem estado → ignora (provavelmente é o user mandando msg aleatória)
     if not state:
+        return
+
+    # ── Coleta de NOME ─────────────────────────────────────────────────────
+    if state == STATE_AWAITING_NAME:
+        if len(text) < 3 or " " not in text:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🤔 Me passa seu *nome completo* (nome e sobrenome).",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+        capi.save_user_pii(uid, full_name=text)
+        _set_state(uid, STATE_AWAITING_PHONE)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=ask_phone_text(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
 
     # ── Coleta de TELEFONE ─────────────────────────────────────────────────
@@ -391,7 +422,7 @@ async def _generate_and_send_pix(context, chat_id, uid, plan_id):
                 uid=uid,
                 amount=plan["price"],
                 plan_id=plan_id,
-                nome_cliente=user.full_name or "Cliente",
+                nome_cliente=pii.get("full_name") or (user.full_name or "Cliente"),
                 telefone=pii.get("phone"),
             )
         except Exception as e:
