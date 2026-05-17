@@ -2,13 +2,10 @@
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║              💳 SYNCPAY INTEGRATION — Maya Bot                              ║
 ║                                                                              ║
-║  Versão refatorada da integração original. Mudanças:                        ║
-║    • Credenciais via env vars (não mais hardcoded)                          ║
-║    • Sem dependência de _load_bot_main() (sophia_bot_v7.2_clean.py)         ║
-║    • API pública limpa: gerar_pix, salvar_customer, recuperar_customer,     ║
-║      registrar webhook, etc.                                                ║
-║    • Mapeamento identifier→plan_id pra entregar conteúdo certo              ║
-║    • Retry simples no _get_token e _gerar_pix                               ║
+║  Versão corrigida:                                                          ║
+║    • Idempotência por identifier (não mais por dia)                         ║
+║    • Só marca como "processado" APÓS entrega bem-sucedida                   ║
+║    • Permite retry automático se a entrega falhar                           ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -34,7 +31,7 @@ logger = logging.getLogger(__name__)
 _r            = None
 _loop         = None
 _bot_app      = None
-_on_payment   = None   # callback chamado quando pagamento confirma
+_on_payment   = None
 
 _token_cache  = {"token": None, "expires_at": None}
 
@@ -42,19 +39,18 @@ _token_cache  = {"token": None, "expires_at": None}
 # 🔑 REDIS KEYS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _k_pix(uid):                 return f"sp:pix:{uid}"
-def _k_id_to_uid(identifier):    return f"sp:id2uid:{identifier}"
-def _k_id_to_plan(identifier):   return f"sp:id2plan:{identifier}"
-def _k_paid(uid):                return f"sp:paid:{uid}"
-def _k_notified(uid, day):       return f"sp:notified:{uid}:{day}"
-def _k_customer(uid):            return f"sp:customer:{uid}"
+def _k_pix(uid):                  return f"sp:pix:{uid}"
+def _k_id_to_uid(identifier):     return f"sp:id2uid:{identifier}"
+def _k_id_to_plan(identifier):    return f"sp:id2plan:{identifier}"
+def _k_paid(uid):                 return f"sp:paid:{uid}"
+def _k_processed(identifier):     return f"sp:processed:{identifier}"
+def _k_customer(uid):             return f"sp:customer:{uid}"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🔐 AUTENTICAÇÃO
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _get_token() -> str:
-    """Cacheia token e renova 5min antes do expiry."""
     now = datetime.utcnow()
     if _token_cache["token"] and _token_cache["expires_at"]:
         if now < _token_cache["expires_at"] - timedelta(minutes=5):
@@ -95,10 +91,6 @@ def _get_token() -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def gerar_pix(uid: int, amount: float, plan_id: str, nome_cliente: str = "Cliente") -> dict:
-    """
-    Gera cobrança PIX na SyncPay e armazena o mapeamento identifier→uid→plan_id
-    em Redis com TTL. Retorna dict com pix_code e identifier.
-    """
     token = _get_token()
     webhook_url = f"{config.WEBHOOK_BASE_URL}{config.SYNCPAY_WEBHOOK_PATH}"
 
@@ -108,7 +100,7 @@ def gerar_pix(uid: int, amount: float, plan_id: str, nome_cliente: str = "Client
         "webhook_url": webhook_url,
         "client": {
             "name":  nome_cliente or "Cliente",
-            "cpf":   "00000000000",                          # SyncPay aceita placeholder
+            "cpf":   "00000000000",
             "email": f"user{uid}@{config.BOT_PERSONA_NAME.lower()}bot.com",
             "phone": "11999999999",
         },
@@ -159,7 +151,6 @@ def gerar_pix(uid: int, amount: float, plan_id: str, nome_cliente: str = "Client
 
 
 def get_pix_pendente(uid: int) -> Optional[dict]:
-    """Retorna o PIX pendente (se houver) pra reuso."""
     data = _r.get(_k_pix(uid))
     if not data:
         return None
@@ -170,14 +161,10 @@ def get_pix_pendente(uid: int) -> Optional[dict]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 👤 CUSTOMER DATA (snapshot no momento do PIX, lido no webhook)
+# 👤 CUSTOMER DATA
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def salvar_customer(uid: int, tg_user, plan_id: str) -> dict:
-    """
-    Snapshot dos dados do user Telegram no momento do PIX. O webhook
-    não tem acesso ao objeto tg_user, então a gente persiste aqui.
-    """
     data = {
         "chat_id":       uid,
         "full_name":     tg_user.full_name or "",
@@ -207,11 +194,10 @@ def recuperar_customer(uid: int) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ✅ VERIFICAÇÃO DE PAGAMENTO (consulta ativa)
+# ✅ CONSULTA DE STATUS / FLAGS
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def consultar_status(identifier: str) -> Optional[str]:
-    """Consulta direta o status do PIX. Usado pelo botão Verificar Status."""
     try:
         token = _get_token()
         resp = requests.get(
@@ -228,7 +214,13 @@ def consultar_status(identifier: str) -> Optional[str]:
 
 
 def usuario_pagou(uid: int) -> bool:
+    """Pagamento foi confirmado (webhook recebeu PAID_OUT)."""
     return bool(_r and _r.exists(_k_paid(uid)))
+
+
+def foi_entregue(identifier: str) -> bool:
+    """Entrega do VIP foi feita com sucesso pra esse pagamento."""
+    return bool(_r and _r.exists(_k_processed(identifier)))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -257,11 +249,15 @@ def _register_webhook_route(flask_app):
             return jsonify({"ok": True}), 200
         except Exception as e:
             logger.error(f"[SyncPay Webhook] Erro: {e}")
-            return jsonify({"ok": False}), 200   # 200 mesmo em erro pra não disparar retry
+            return jsonify({"ok": False}), 200
 
 
 async def _processar_pagamento(identifier: str, amount):
-    """Pagamento confirmado: chama callback on_payment registrado no init."""
+    """
+    Pagamento confirmado. Idempotência POR IDENTIFIER:
+      - Se já foi entregue antes (mesmo identifier) → ignora (webhook duplicado)
+      - Se a entrega falhar → não marca como processado, permite retry
+    """
     try:
         uid_raw = _r.get(_k_id_to_uid(identifier))
         if not uid_raw:
@@ -271,19 +267,21 @@ async def _processar_pagamento(identifier: str, amount):
 
         plan_id = _r.get(_k_id_to_plan(identifier)) or ""
 
-        # Idempotência — não processa duas vezes no mesmo dia
-        notif_key = _k_notified(uid, date.today().isoformat())
-        if _r.exists(notif_key):
-            logger.info(f"[SyncPay] Pagamento já processado hoje para uid={uid}")
+        # ── Idempotência por identifier (NÃO mais por dia) ────────────────────
+        # Protege contra webhook duplicado, mas permite reprocessar pagamentos
+        # diferentes do mesmo usuário (ele pode comprar várias vezes no mesmo dia).
+        if _r.exists(_k_processed(identifier)):
+            logger.info(f"[SyncPay] Webhook duplicado p/ identifier={identifier} — ignorando")
             return
 
-        _r.setex(notif_key, timedelta(hours=48), "1")
+        # Marca pagamento confirmado (diferente de "entregue")
         _r.setex(_k_paid(uid), timedelta(days=365), "1")
 
         customer = recuperar_customer(uid)
         logger.info(f"[SyncPay] ✅ Pagamento OK: uid={uid} plan={plan_id} R${amount}")
 
-        # Dispara callback registrado (release_vip_access em maya_bot.py)
+        # ── Dispara entrega ───────────────────────────────────────────────────
+        delivery_success = False
         if _on_payment:
             try:
                 await _on_payment(
@@ -293,17 +291,74 @@ async def _processar_pagamento(identifier: str, amount):
                     identifier=identifier,
                     customer=customer,
                 )
+                delivery_success = True
             except Exception as cb_err:
-                logger.error(f"[SyncPay] Erro no callback on_payment: {cb_err}")
+                logger.error(f"[SyncPay] ❌ Entrega falhou para uid={uid}: {cb_err}")
 
-        # Limpa chaves temporárias
+        # ── Só marca como processado E limpa caches APÓS entrega OK ──────────
+        if delivery_success:
+            _r.setex(_k_processed(identifier), timedelta(days=7), "1")
+            _r.delete(_k_id_to_uid(identifier))
+            _r.delete(_k_id_to_plan(identifier))
+            _r.delete(_k_pix(uid))
+            _r.delete(_k_customer(uid))
+            logger.info(f"[SyncPay] 🎉 Entrega concluída e marcada: id={identifier}")
+        else:
+            logger.warning(
+                f"[SyncPay] ⚠️ Entrega falhou — chaves mantidas pra retry. "
+                f"Cliente pode clicar 'Verificar Status' pra tentar de novo."
+            )
+
+    except Exception as e:
+        logger.error(f"[SyncPay] ❌ Erro _processar_pagamento: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🔁 RETRY MANUAL DE ENTREGA (usado pelo botão "Verificar Status")
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def retry_entrega(identifier: str) -> bool:
+    """
+    Reprocessa a entrega de um pagamento já confirmado que falhou.
+    Retorna True se a entrega foi bem-sucedida.
+    """
+    try:
+        # Já foi entregue? Não faz nada.
+        if _r.exists(_k_processed(identifier)):
+            logger.info(f"[SyncPay] retry_entrega: id={identifier} já entregue antes")
+            return True
+
+        uid_raw = _r.get(_k_id_to_uid(identifier))
+        if not uid_raw:
+            logger.warning(f"[SyncPay] retry_entrega: id={identifier} sem uid (expirou)")
+            return False
+        uid = int(uid_raw)
+
+        plan_id  = _r.get(_k_id_to_plan(identifier)) or ""
+        customer = recuperar_customer(uid)
+
+        if not _on_payment:
+            return False
+
+        await _on_payment(
+            uid=uid,
+            plan_id=plan_id,
+            amount=0.0,
+            identifier=identifier,
+            customer=customer,
+        )
+
+        _r.setex(_k_processed(identifier), timedelta(days=7), "1")
         _r.delete(_k_id_to_uid(identifier))
         _r.delete(_k_id_to_plan(identifier))
         _r.delete(_k_pix(uid))
         _r.delete(_k_customer(uid))
+        logger.info(f"[SyncPay] 🔁 Retry de entrega OK: id={identifier} uid={uid}")
+        return True
 
     except Exception as e:
-        logger.error(f"[SyncPay] ❌ Erro _processar_pagamento: {e}")
+        logger.error(f"[SyncPay] ❌ retry_entrega erro: {e}")
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -311,15 +366,6 @@ async def _processar_pagamento(identifier: str, amount):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def init(flask_app, bot_app, event_loop, redis_conn, on_payment: Callable):
-    """
-    Inicializa a integração:
-      flask_app   — instância Flask pra registrar a rota de webhook
-      bot_app     — Application do python-telegram-bot
-      event_loop  — loop asyncio do bot (pra run_coroutine_threadsafe)
-      redis_conn  — conexão Redis (decode_responses=True recomendado)
-      on_payment  — async callback(uid, plan_id, amount, identifier, customer)
-                    chamado quando o pagamento é confirmado
-    """
     global _r, _loop, _bot_app, _on_payment
 
     if not config.SYNCPAY_CLIENT_ID or not config.SYNCPAY_CLIENT_SECRET:
@@ -339,4 +385,3 @@ def init(flask_app, bot_app, event_loop, redis_conn, on_payment: Callable):
         f"   Webhook URL: {config.WEBHOOK_BASE_URL}{config.SYNCPAY_WEBHOOK_PATH}\n"
         f"   Client ID:   {config.SYNCPAY_CLIENT_ID[:8]}***"
     )
-    logger.info("[SyncPay] 🔔 Registre essa URL no painel SyncPay!")
