@@ -46,7 +46,8 @@ SYNCPAY_BASE_URL      = os.getenv("SYNCPAY_BASE_URL", "https://api.syncpayments.
 # Ex: https://meudominio.com  (sem barra no final)
 WEBHOOK_BASE_URL     = os.getenv("WEBHOOK_BASE_URL", "")
 SYNCPAY_WEBHOOK_PATH = "/webhook/syncpay"
-FLASK_PORT           = int(os.getenv("FLASK_PORT", "8080"))
+# Railway define PORT automaticamente. Em dev local usa FLASK_PORT ou 8080.
+FLASK_PORT           = int(os.getenv("PORT") or os.getenv("FLASK_PORT") or "8080")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🗄️  REDIS
@@ -72,6 +73,7 @@ WHATSAPP_CONTACT       = os.getenv("WHATSAPP_CONTACT", "https://wa.me/5511999999
 # ═══════════════════════════════════════════════════════════════════════════════
 
 PHOTO_PROFILE = MEDIA_DIR / "photo_profile.jpg"   # opcional — foto que aparece no chat
+VIDEO_START   = MEDIA_DIR / "video_start.mp4"     # vídeo de abertura do /start
 AUDIO_START   = MEDIA_DIR / "audio_start.ogg"     # voice message do /start (.ogg ou .mp3)
 VIDEO_TEASER  = MEDIA_DIR / "video_teaser.mp4"    # vídeo de prévia mostrado antes do PIX
 
@@ -94,7 +96,7 @@ PLANS = {
         "id":          "tudo",
         "emoji":       "🔥",
         "name":        "QUERO TUDO AGORA",
-        "price":       1.50,
+        "price":       12.78,
         "duration":    "Vitalício",
         "deliverable": "channel",
     },
