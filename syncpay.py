@@ -325,16 +325,14 @@ async def _processar_pagamento(identifier: str, amount, customer_data: dict):
 
         # ── Atualiza PII no CAPI com dados reais do pagador ─────────────────
         # Isso enriquece o Purchase: CPF + nome reais (vindos do pagamento PIX)
-        if customer_data.get("cpf") or customer_data.get("name"):
+        if customer_data.get("name"):
             capi.save_user_pii(
                 uid,
                 full_name=customer_data.get("name") or None,
-                cpf=customer_data.get("cpf") or None,
             )
             logger.info(
                 f"[SyncPay] 📥 PII atualizada do webhook: "
-                f"nome={'✓' if customer_data.get('name') else '✗'} "
-                f"cpf={'✓' if customer_data.get('cpf') else '✗'}"
+                f"nome={'✓' if customer_data.get('name') else '✗'}"
             )
 
         customer = recuperar_customer(uid)
