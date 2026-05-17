@@ -234,11 +234,12 @@ async def cb_pix(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid     = query.from_user.id
     chat_id = query.message.chat_id
 
-    # 1) Vídeo teaser (opcional)
-    if config.VIDEO_TEASER.exists():
+    # 1) Vídeo teaser antes do PIX (mesmo do start, se não tiver um separado)
+    video_path = config.VIDEO_TEASER if config.VIDEO_TEASER.exists() else config.VIDEO_START
+    if video_path.exists():
         try:
             await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_VIDEO)
-            with open(config.VIDEO_TEASER, "rb") as video:
+            with open(video_path, "rb") as video:
                 await context.bot.send_video(chat_id, video=video)
         except Exception as e:
             logger.warning(f"Erro enviando vídeo teaser: {e}")
@@ -336,13 +337,20 @@ async def cb_check_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cb_copy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer("Reenviando o código!")
 
     pendente = syncpay.get_pix_pendente(query.from_user.id)
     if not pendente:
-        await query.message.reply_text("⚠️ Seu PIX expirou. Selecione o plano de novo.")
+        await query.answer("⚠️ Seu PIX expirou. Selecione o plano de novo.", show_alert=True)
         return
 
+    # Alert grande na tela confirmando "cópia" (na prática reenvia a chave)
+    await query.answer(
+        "✅ Chave PIX copiada!\n\n"
+        "👆 Toque no código abaixo pra colar no app do seu banco.",
+        show_alert=True,
+    )
+
+    # Reenvia o código em monospace pro usuário tocar e o Telegram copiar de verdade
     await context.bot.send_message(
         chat_id=query.message.chat_id,
         text=f"`{pendente['pix_code']}`",
