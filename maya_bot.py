@@ -312,18 +312,18 @@ async def cb_check_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"[CHECK] uid={query.from_user.id} id={identifier} status={status}")
 
     if status in ["completed", "PAID_OUT"]:
-        await query.answer("✅ Pagamento confirmado! Liberando acesso...", show_alert=True)
-        # Se o webhook ainda não rodou, força a liberação aqui
-        if not syncpay.usuario_pagou(query.from_user.id):
-            customer = syncpay.recuperar_customer(query.from_user.id)
-            await release_vip_access(
-                uid=query.from_user.id,
-                plan_id=customer.get("plan_id", ""),
-                amount=0,
-                identifier=identifier,
-                customer=customer,
-            )
-    elif status in ["pending", "PENDING", None]:
+        # Se já foi entregue, só avisa. Senão, tenta entregar (retry).
+        if syncpay.foi_entregue(identifier):
+            await query.answer("✅ Seu acesso já foi liberado! Confere as mensagens acima.", show_alert=True)
+        else:
+            await query.answer("✅ Pagamento confirmado! Liberando acesso...", show_alert=True)
+            ok = await syncpay.retry_entrega(identifier)
+            if not ok:
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text="⚠️ Pagamento confirmado mas tive um problema pra liberar. Me chama no @suporte."
+                )
+    elif status in ["pending", "PENDING", "WAITING_FOR_APPROVAL", None]:
         await query.answer("⏳ Pagamento ainda não foi identificado. Aguarde alguns segundos após pagar.", show_alert=True)
     else:
         await query.answer(f"Status atual: {status}", show_alert=True)
