@@ -142,17 +142,17 @@ def plan_confirmation_text(plan: dict) -> str:
 def ask_name_text() -> str:
     return (
         "📝 *Antes de gerar seu PIX, me passa:*\n\n"
-        "1️⃣ Seu *nome completo*\n\n"
-        "_Vou usar pra liberar seu acesso e dar suporte caso precise._"
+        "1️⃣ Seu *nome e sobrenome*\n\n"
+        "_Vou usar pra liberar seu acesso!._"
     )
 
 
 def ask_phone_text() -> str:
     return (
-        "✅ Show!\n\n"
+        "✅ Otimo Amor!\n\n"
         "2️⃣ Agora me passa seu *WhatsApp com DDD*\n"
         "_(ex: 31 99999-9999)_\n\n"
-        "_É pra te enviar o link do grupo VIP no zap caso o Telegram dê problema._"
+        "_É pra te enviar o link do grupo VIP caso dê problema!._"
     )
 
 
