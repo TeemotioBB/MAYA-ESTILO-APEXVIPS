@@ -98,7 +98,7 @@ PLANS = {
         "id":          "tudo",
         "emoji":       "🔥",
         "name":        "QUERO TUDO AGORA",
-        "price":       1.50,
+        "price":       9.90,
         "duration":    "Vitalício",
         "deliverable": "channel",
     },
